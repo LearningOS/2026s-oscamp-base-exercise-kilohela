@@ -86,7 +86,7 @@ impl<T> RwLock<T> {
             if self.state.compare_exchange(state, state | WRITER_WAITING, Ordering::AcqRel, Ordering::Acquire).is_err() {continue;}
             loop {
                 let state = self.state.load(Ordering::Acquire);
-                if state & WRITER_HOLDING!= 0 {continue;}
+                if state & WRITER_HOLDING != 0 || state & READER_MASK != 0 {continue;}
                 self.state.store((state | WRITER_HOLDING) & !WRITER_WAITING, Ordering::Release);
                 return RwLockWriteGuard { lock: self };
             }
