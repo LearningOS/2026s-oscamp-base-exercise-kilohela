@@ -137,7 +137,20 @@ impl Scheduler {
     ///    `sp` must be 16-byte aligned (e.g. `(stack_top - 16) & !15` to leave headroom).
     /// 3. Push a `GreenThread` with this context, state `Ready`, and `entry` stored for the wrapper to call.
     pub fn spawn(&mut self, entry: extern "C" fn()) {
-        todo!("alloc stack, init ctx with ra=thread_wrapper and aligned sp, push GreenThread(Ready, entry)")
+        self.threads.push({
+            let buf = Vec::with_capacity(STACK_SIZE);
+            let top = buf.as_ptr() as usize + STACK_SIZE;
+            GreenThread {
+                ctx: TaskContext {
+                    sp: (top - top % 16) as u64,
+                    ra: thread_wrapper as u64,
+                    ..TaskContext::default()
+                },
+                state: ThreadState::Ready,
+                _stack: Some(buf),
+                entry: Some(entry),
+            }
+        })
     }
 
     /// Run the scheduler until all threads (except the main one) are `Finished`.
@@ -146,12 +159,32 @@ impl Scheduler {
     /// 2. Loop: if all threads in `threads[1..]` are `Finished`, break; otherwise call `schedule_next()` (which may switch away and later return).
     /// 3. Clear `SCHEDULER` when done.
     pub fn run(&mut self) {
-        todo!("set SCHEDULER to self, loop until threads[1..] all Finished, call schedule_next, then clear SCHEDULER")
+        unsafe {SCHEDULER = self as *mut Scheduler;}
+        loop {
+            if self.threads[1..].iter().all(|t| t.state == ThreadState::Finished) {break;}
+            yield_now();
+        }
     }
 
     /// Find the next ready thread (starting from `current + 1` round-robin), mark current as `Ready` (if not `Finished`), mark next as `Running`, set `CURRENT_THREAD_ENTRY` if the next thread has an entry, then switch to it.
     fn schedule_next(&mut self) {
-        todo!("round-robin find next Ready, set current Ready (if not Finished), next Running, CURRENT_THREAD_ENTRY, then switch_context")
+        let old_id = self.current;
+        let mut new_id = (old_id + 1) % self.threads.len();
+        if self.threads[old_id].state == ThreadState::Running {
+            self.threads[old_id].state = ThreadState::Ready;
+        }
+        loop {
+            if self.threads[new_id].state == ThreadState::Ready {break;}
+            new_id = (new_id + 1) % self.threads.len();
+        }
+        // println!("from {old_id} to {new_id}");
+        self.current = new_id;
+        unsafe {
+            CURRENT_THREAD_ENTRY = self.threads[new_id].entry;
+            let old = &mut (*self.threads.as_mut_ptr().add(old_id)).ctx;
+            let new = & (*self.threads.as_mut_ptr().add(new_id)).ctx;
+            unsafe {switch_context(old, new);}
+        }
     }
 }
 
