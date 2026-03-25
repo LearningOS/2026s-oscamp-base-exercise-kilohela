@@ -103,7 +103,7 @@ impl Sv39PageTable {
     /// 提示：右移 (12 + level * 9) 位，然后与 0x1FF 做掩码。
     pub fn extract_vpn(va: u64, level: usize) -> usize {
         // TODO: 从虚拟地址中提取指定级别的 VPN 索引
-        todo!()
+        ((va >> (12 + level*9)) & 0x1FF) as usize
     }
 
     /// 建立从虚拟页到物理页的映射（4KB 页）。
@@ -119,7 +119,32 @@ impl Sv39PageTable {
         // 对于中间层级（level 2 和 level 1），如果对应 VPN 的页表项（PTE）无效（PTE_V == 0），
         // 则需要分配一个新的页表节点（使用 alloc_node），并将新节点的 PPN 写入当前 PTE（仅设置 PTE_V 标志）。
         // 最后在 level 0 的 PTE 中写入目标物理页号（pa >> 12）和 flags。
-        todo!()
+        let vpn2 = Self::extract_vpn(va, 2);
+        let vpn1 = Self::extract_vpn(va, 1);
+        let vpn0 = Self::extract_vpn(va, 0);
+
+        // 1GiB leaf PTE or contains pointer to next level PTE
+        let pte = self.nodes[&self.root_ppn].entries[vpn2];
+        let mut ppn2  = (pte >> 10) & ((1u64 << 44) - 1);
+        if pte & 1 == 0 {
+            ppn2 = self.alloc_node();
+            let pte = self.nodes.get_mut(&self.root_ppn).unwrap().entries.get_mut(vpn2).unwrap();
+            *pte = (ppn2 << 10) | 1;
+        }
+
+        // 2MiB leaf PTE or contains pointer to next level PTE
+        let pte = self.nodes[&ppn2].entries[vpn1];
+        let mut ppn1  = (pte >> 10) & ((1u64 << 44) - 1);
+        if pte & 1 == 0 {
+            ppn1 = self.alloc_node();
+            let pte = self.nodes.get_mut(&ppn2).unwrap().entries.get_mut(vpn1).unwrap();
+            *pte = (ppn1 << 10) | 1;
+        }
+
+        // 4KiB leaf PTE
+        let pte = self.nodes.get_mut(&ppn1).unwrap().entries.get_mut(vpn0).unwrap();
+        *pte = (pa >> 12 << 10) | flags;
+
     }
 
     /// 遍历三级页表，将虚拟地址翻译为物理地址。
@@ -141,7 +166,35 @@ impl Sv39PageTable {
         // 如果 PTE 是叶节点（即 R、W、X 标志位中有至少一个被置位），则可以直接使用该 PTE 中的物理页号（PPN）计算最终的物理地址。
         // 否则，该 PTE 指向下一级页表节点，继续遍历下一级。
         // 遍历到 level 0 时，PTE 必须是叶节点。
-        todo!()
+        let vpn2 = Self::extract_vpn(va, 2);
+        let vpn1 = Self::extract_vpn(va, 1);
+        let vpn0 = Self::extract_vpn(va, 0);
+
+        // 1GiB leaf PTE or contains pointer to next level PTE
+        let pte = self.nodes[&self.root_ppn].entries[vpn2];
+        let ppn2  = (pte >> 10) & ((1u64 << 44) - 1);
+        if pte & 1 == 0 {return TranslateResult::PageFault;}
+        if (pte & 0xF) >> 1 != 0 {
+            let pa = (((pte >> 28) & ((1 << 26) - 1)) << 30) | (va & ((1 << 30) - 1));
+            return TranslateResult::Ok(pa);
+        }
+
+        // 2MiB leaf PTE or contains pointer to next level PTE
+        let pte = self.nodes[&ppn2].entries[vpn1];
+        let ppn1  = (pte >> 10) & ((1u64 << 44) - 1);
+        if pte & 1 == 0 {return TranslateResult::PageFault;}
+        if (pte & 0xF) >> 1 != 0 {
+            let pa = (((pte >> 19) & ((1 << 35) - 1)) << 21) | (va & ((1 << 21) - 1));
+            return TranslateResult::Ok(pa);
+        }
+
+        // 4KiB leaf PTE
+        let pte = self.nodes[&ppn1].entries[vpn0];
+        if (pte & 0xF) >> 1 != 0 {
+            let pa = (((pte >> 10) & ((1 << 44) - 1)) << 12) | (va & ((1 << 12) - 1));
+            return TranslateResult::Ok(pa);
+        }
+        return TranslateResult::PageFault;
     }
 
     /// 建立大页映射（2MB superpage，在 level 1 设叶子 PTE）。
@@ -160,7 +213,25 @@ impl Sv39PageTable {
         // 你需要在 level 2 找到或创建中间页表节点，然后在 level 1 写入叶子 PTE。
         // 注意大页的物理页号计算方式与普通页相同（pa >> 12），
         // 但翻译时 offset 包含虚拟地址的低 21 位（VPN[0] 部分 + 12 位页内偏移）。
-        todo!()
+        let vpn2 = Self::extract_vpn(va, 2);
+        let vpn1 = Self::extract_vpn(va, 1);
+
+        // 1GiB leaf PTE or contains pointer to next level PTE
+        let pte = self.nodes[&self.root_ppn].entries[vpn2];
+        let mut ppn  = (pte >> 10) & ((1u64 << 44) - 1);
+        if pte & 1 == 0 {
+            ppn = self.alloc_node();
+            let pte = self.nodes.get_mut(&self.root_ppn).unwrap().entries.get_mut(vpn2).unwrap();
+            *pte = (ppn << 10) | 1;
+        }
+
+        // 2MiB leaf PTE or contains pointer to next level PTE
+        let pte = self.nodes[&ppn].entries[vpn1];
+        if pte & 1 == 0 {
+            let pte = self.nodes.get_mut(&ppn).unwrap().entries.get_mut(vpn1).unwrap();
+            *pte = (((pa >> 21) & ((1 << 35) - 1)) << 19) | flags;
+        }
+        
     }
 }
 
