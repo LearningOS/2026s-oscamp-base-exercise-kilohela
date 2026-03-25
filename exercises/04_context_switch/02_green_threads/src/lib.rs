@@ -179,6 +179,7 @@ impl Scheduler {
         }
         // println!("from {old_id} to {new_id}");
         self.current = new_id;
+        self.threads[new_id].state = ThreadState::Running;
         unsafe {
             CURRENT_THREAD_ENTRY = self.threads[new_id].entry;
             let old = &mut (*self.threads.as_mut_ptr().add(old_id)).ctx;
